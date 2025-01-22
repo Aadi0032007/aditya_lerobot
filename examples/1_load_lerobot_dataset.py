@@ -23,7 +23,7 @@ import lerobot
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 print("List of available datasets:")
-pprint(lerobot.available_datasets)
+print(lerobot.available_datasets)
 
 # Let's take one for this example
 repo_id = "lerobot/pusht"
