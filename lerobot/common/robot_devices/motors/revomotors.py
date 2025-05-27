@@ -15,6 +15,8 @@ import numpy as np
 
 write_call_counter = 0
 pause_gripper_angle = 32
+freeze_flag = 0
+robot_initialized = 0
 
 RobotData = namedtuple("RobotData", [
     "position",
@@ -226,8 +228,11 @@ class RevobotRobotBus:
             else:
                 positions.append(0.0)
         # For joints 6 and 7, we use joint67Status.
-        positions.append(float(self.joint67Status.j6Position)/88.8889)
-        positions.append(float(self.joint67Status.j7Position)/120)
+        # positions.append(float(self.joint67Status.j6Position)/88.8889)  #Super Gripper
+        positions.append(float(self.joint67Status.j6Position)/71.1111)
+        # positions.append(float(self.joint67Status.j7Position)/120) # default 120, 171.4  #Super Gripper
+        positions.append(float(self.joint67Status.j7Position)/17.778)  #Bug
+
         if len(positions) == 7:
             positions.pop(4)
         
@@ -242,9 +247,13 @@ class RevobotRobotBus:
         Different joints use different scaling and offset adjustments.
         """
         if index == 5:  # 6th position (0-based index)
-            return int((67.5 - int(value)) * 88.8889)
+            # return int((67.5 - int(value)) * 88.8889) #Super Gripper
+            return int((116 - int(value)) * 71.1111)
         elif index == 6:  # 7th position (0-based index)
-            return int(value * 700)
+            # return int(value * 700)  #Super Gripper
+            # return int(value * 38)  #Bug
+            #print(1350 + value * 17.778)
+            return int(1350 + value * 17.778)
         elif index == 1:
             return int((90 - int(value)) * 3600)
         elif index == 3:
@@ -264,18 +273,58 @@ class RevobotRobotBus:
         # print(np.array(values).tolist())
         # print(values)
         values_list = np.array(values).tolist()
+        # print(values_list)
         if len(values_list) < 7:
             values_list.insert(4, 0)
         
         command_parts = ["xxx xxx xxx xxx P"]
         for i, value in enumerate(values_list):
             computed = self.revobot_robot_offset(i, value)
-            command_parts.append(str(computed))
+            
+            # Skip the programming the Gripper Motor1 as we will use FPGA command to Exevute it
+            if i < 6:
+                command_parts.append(str(computed))
+                
+            # This is where we get the offset value of the Gripper 1 Motor
+            # We use the offset value of Gripper1 value to program the Gripper2 Value
+            # Motor 6 is the Gripper-1 Motor
+            
+            if i == 6:
+                
+                # We need to freeze motors 1-5 during training because
+                # during gripping, human jitters are transferred to the robot motors
+                freeze_flag = 0
+                if ((value < 30) & (value > -5)):
+                    freeze_flag = 1
+                    
+                # This is Gripper-1 steps in little endian. Notice 
+                # that we already have offset value for this gripper
+                byte_data = (computed).to_bytes(2, 'little')
+                data3 = format(byte_data[0], '02x')
+                data4 = format(byte_data[1], '02x')
+                        
+                # This is Gripper-2 steps in little endian. We need to calculate the 
+                # offset value of this gripper based on the Gripper-1 offset. This is 
+                # because in _offset() function only Motor 1-6 gripper offsets are calculated.
+                computed = 1954 + int((45-value) * 17.778)
+                byte_data = (computed).to_bytes(2, 'little')
+                data1 = format(byte_data[0], '02x')
+                data2 = format(byte_data[1], '02x')             
+                
+                # Gripper-2 Command
+                command2 = "xxx xxx xxx xxx S ServoSetX 4 116 12 %"+str(data1)+"%"+str(data2)+"%00%00;"
+                # Gripper-1 Command
+                command3 = "xxx xxx xxx xxx S ServoSetX 1 116 12 %"+str(data3)+"%"+str(data4)+"%00%00;"
+                
         command = " ".join(command_parts) + ";"
+        # print(command)
         
         # print(command)
         if  write_call_counter == 1:
-            self.send_command(command)
+            self.send_command(command2)
+            self.send_command(command3)
+            if (freeze_flag == 0):
+                self.send_command(command)
             write_call_counter = 0
         else:
             self.read()
@@ -285,33 +334,69 @@ class RevobotRobotBus:
         """ Add all the initialisation parameters during the socket connection
             these parameters only execute once for every socket connection."""
             
-        # init_config_lst = [
-        #         "S AngularSpeedStartAndEnd 10000", 
-        #         "S AngularSpeed 10000",
-        #         "S AngularAcceleration 10000",
-        #         "S J1_PID_P 0.13",
-        #         "S J2_PID_P 0.11",
-        #         "S J3_PID_P 0.11",
-        #         "S J4_PID_P 0.1",
-        #         "S J5_PID_P 0.5"
-        #         ]
+        global robot_initialized
+            
+        if (robot_initialized):
+            return
         
         init_config_lst = [
+                "P 0 0 0 0 0",
+                "S, J1BoundryHigh, 612000",
+                "S, J1BoundryLow, -612000",
+                "S, J2BoundryHigh, 320400",
+                "S, J2BoundryLow, -320400",
+                "S, J3BoundryHigh, 500400",
+                "S, J3BoundryLow, -500400",
+                "S, J4BoundryHigh, 400000",
+                "S, J4BoundryLow, -400000",
+                "S, J5BoundryHigh, 450000",
+                "S, J5BoundryLow, -450000",
+                "a 0 0 0 0 0",
+                "a 0 0 0 36000 0",
+                "a 0 0 0 36000 36000",
+                "a 0 0 0 -36000 36000",
+                "a 0 0 0 -36000 -36000",
+                "S RebootServo 1 430 1296000 0",
+                "S RebootServo 3 430 324000 0",
+                "S RebootServo 4 430 1296000 0",
+                "S ServoSetX 1 11 4",
+                "S ServoSetX 3 11 4",
+                "S ServoSetX 4 11 4",
+                "S ServoSetX 1 65 1",
+                "S ServoSetX 3 65 1",
+                "S ServoSetX 4 65 1",
+                "S ServoSetX 1 31 70",
+                "S ServoSetX 3 31 70",
+                "S ServoSetX 4 31 70",
+                "S ServoSetX 1 63 52",
+                "S ServoSetX 3 63 52",
+                "S ServoSetX 4 63 52",
+                "S ServoSetX 1 64 1",
+                "S ServoSetX 3 64 1",
+                "S ServoSetX 4 64 1",
+                "S ServoSetX 4 84 50",
+                "S ServoSetX 4 116 12 %54%08%00%00",
+                "a 0 0 0 0 0 8040 1972",
                 "S AngularSpeedStartAndEnd 10000", 
                 "S AngularSpeed 10000",
                 "S AngularAcceleration 10000",
                 "S J1_PID_P 0.10",
                 "S J2_PID_P 0.10",
                 "S J3_PID_P 0.10",
-                "S J4_PID_P 0.1",
-                "S J5_PID_P 0.5"
+                "S J4_PID_P 0.10",
+                "S J5_PID_P 0.10"
                 ]
+        
+        print("Initialization Started")
         
         for i in init_config_lst:
             command = f"xxx xxx xxx xxx {i};"
             self.send_command(command)
+            time.sleep(0.5)
             
-        # print("initialisation done")
+        robot_initialized = 1;
+                        
+        print("initialisation Finished")
        
     def __del__(self):
         # print("RevobotRobotBus.__del__ called")
